@@ -1,5 +1,29 @@
 idf_component_register(
-    SRCS "main.c"
-    INCLUDE_DIRS "."
-    REQUIRES esp_wifi mqtt nvs_flash esp_http_server
+    SRCS
+        "main.c"
+        "config/config_manager.c"
+        "core/event_bus.c"
+        "device/device_manager.c"
+        "network/wifi_manager.c"
+        "bridge/mqtt_bridge.c"
+        "services/web_server.c"
+        "zigbee/zigbee_core.c"
+
+    INCLUDE_DIRS
+        "."
+        "config"
+        "core"
+        "device"
+        "network"
+        "bridge"
+        "services"
+        "zigbee"
+
+    REQUIRES
+        esp_wifi
+        esp_event
+        esp_netif
+        nvs_flash
+        mqtt
+        esp_http_server
 )
