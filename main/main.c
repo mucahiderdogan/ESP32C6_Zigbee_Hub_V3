@@ -13,6 +13,8 @@ static const char *TAG = "gateway";
 
 void app_main(void)
 {
+    ESP_LOGI(TAG, "Gateway starting...");
+    
     nvs_flash_init();
 
     config_manager_init();
