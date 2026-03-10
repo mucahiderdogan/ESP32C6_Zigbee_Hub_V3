@@ -1,4 +1,5 @@
 #include "web_server.h"
+#include "device_manager.h"
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -142,11 +143,12 @@ static esp_err_t ws_handler(httpd_req_t *req)
    ========================= */
 static esp_err_t devices_handler(httpd_req_t *req)
 {
-    const char *resp =
-        "{ \"devices\": [] }";
+    char json[1024];
+
+    device_manager_get_json(json, sizeof(json));
 
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
 
     return ESP_OK;
 }
@@ -223,8 +225,6 @@ void web_server_start(void)
             .uri = "/reset",
             .method = HTTP_GET,
             .handler = reset_handler};
-
-        httpd_register_uri_handler(server, &reset);
 
         httpd_register_uri_handler(server, &root);
         httpd_register_uri_handler(server, &ws);

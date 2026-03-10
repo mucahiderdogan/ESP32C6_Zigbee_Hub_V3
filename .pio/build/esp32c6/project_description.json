@@ -1,7 +1,7 @@
 {
     "version":            "1.2",
     "project_name":       "ESP32C6_Zigbee_Hub_V2",
-    "project_version":    "1f93c32-dirty",
+    "project_version":    "c9dca67-dirty",
     "project_path":       "D:/DATA/Projeler/_Projeler/PlatformIO/Projects/ESP32C6_Zigbee_Hub_V3",
     "idf_path":           "C:/Users/merdogan/.platformio/packages/framework-espidf",
     "build_dir":          "D:/DATA/Projeler/_Projeler/PlatformIO/Projects/ESP32C6_Zigbee_Hub_V3/.pio/build/esp32c6",
