@@ -569,6 +569,16 @@ endif()
 
 if(NOT CMAKE_INSTALL_LOCAL_ONLY)
   # Include the install script for the subdirectory.
+  include("D:/DATA/Projeler/_Projeler/PlatformIO/Projects/ESP32C6_Zigbee_Hub_V3/.pio/build/esp32c6/esp-idf/espressif__esp-zboss-lib/cmake_install.cmake")
+endif()
+
+if(NOT CMAKE_INSTALL_LOCAL_ONLY)
+  # Include the install script for the subdirectory.
+  include("D:/DATA/Projeler/_Projeler/PlatformIO/Projects/ESP32C6_Zigbee_Hub_V3/.pio/build/esp32c6/esp-idf/espressif__esp-zigbee-lib/cmake_install.cmake")
+endif()
+
+if(NOT CMAKE_INSTALL_LOCAL_ONLY)
+  # Include the install script for the subdirectory.
   include("D:/DATA/Projeler/_Projeler/PlatformIO/Projects/ESP32C6_Zigbee_Hub_V3/.pio/build/esp32c6/esp-idf/main/cmake_install.cmake")
 endif()
 

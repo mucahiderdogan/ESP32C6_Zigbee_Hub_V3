@@ -24,6 +24,17 @@ static void wifi_event_handler(void* arg,
         ESP_LOGI(TAG, "WiFi connected");
     }
 
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        wifi_event_sta_disconnected_t *event =
+            (wifi_event_sta_disconnected_t *)event_data;
+
+        xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT);
+
+        ESP_LOGW(TAG, "WiFi disconnected, reason=%d", event->reason);
+        ESP_LOGI(TAG, "Retrying WiFi connection");
+        esp_wifi_connect();
+    }
+
     if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
 
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
@@ -78,4 +89,16 @@ void wifi_manager_init(void)
     esp_wifi_set_mode(WIFI_MODE_STA);
     esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
     esp_wifi_start();
+}
+
+bool wifi_manager_wait_until_ready(TickType_t timeout_ticks)
+{
+    EventBits_t bits = xEventGroupWaitBits(
+        wifi_event_group,
+        WIFI_CONNECTED_BIT,
+        pdFALSE,
+        pdTRUE,
+        timeout_ticks);
+
+    return (bits & WIFI_CONNECTED_BIT) != 0;
 }

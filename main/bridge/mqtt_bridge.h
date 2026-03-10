@@ -1,8 +1,12 @@
 #pragma once
 
+#include <stdbool.h>
+
 void mqtt_bridge_start(void);
 
 void mqtt_publish_devices(const char *json);
 
-void mqtt_publish_ha_sensor(const char *name,
-                            const char *id);
+void mqtt_publish_all_discovery(void);
+void mqtt_publish_joined_device(const char *name, const char *ieee);
+void mqtt_publish_pair_state(bool active);
+void mqtt_publish_reset_state(bool active);

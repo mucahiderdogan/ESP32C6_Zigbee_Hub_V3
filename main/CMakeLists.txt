@@ -7,6 +7,7 @@ idf_component_register(
         "network/wifi_manager.c"
         "bridge/mqtt_bridge.c"
         "services/web_server.c"
+        "system/bootstrap.c"
         "zigbee/zigbee_core.c"
 
     INCLUDE_DIRS
@@ -17,13 +18,16 @@ idf_component_register(
         "network"
         "bridge"
         "services"
+        "system"
         "zigbee"
 
     REQUIRES
         esp_wifi
         esp_event
         esp_netif
+        esp_coex
         nvs_flash
         mqtt
         esp_http_server
+        espressif__esp-zigbee-lib
 )

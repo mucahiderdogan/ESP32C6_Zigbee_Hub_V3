@@ -14,5 +14,4 @@
 
 // Zigbee
 #define ZIGBEE_CHANNEL  20
-#define MAX_DEVICES     20
 #define PERMIT_JOIN_SEC 60

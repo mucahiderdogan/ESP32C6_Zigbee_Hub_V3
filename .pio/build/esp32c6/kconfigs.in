@@ -77,3 +77,4 @@ source "C:/Users/merdogan/.platformio/packages/framework-espidf/components/usb/K
 source "C:/Users/merdogan/.platformio/packages/framework-espidf/components/vfs/Kconfig"
 source "C:/Users/merdogan/.platformio/packages/framework-espidf/components/wear_levelling/Kconfig"
 source "C:/Users/merdogan/.platformio/packages/framework-espidf/components/wifi_provisioning/Kconfig"
+source "D:/DATA/Projeler/_Projeler/PlatformIO/Projects/ESP32C6_Zigbee_Hub_V3/managed_components/espressif__esp-zigbee-lib/Kconfig"

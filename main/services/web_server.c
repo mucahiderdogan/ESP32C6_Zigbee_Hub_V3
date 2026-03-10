@@ -1,5 +1,6 @@
 #include "web_server.h"
 #include "device_manager.h"
+#include "zigbee_core.h"
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -9,6 +10,7 @@
 #include <string.h>
 
 static const char *TAG = "WEB";
+static const char *PAIR_CMD = "pair";
 
 static httpd_handle_t server = NULL;
 static int ws_client_fd = -1;
@@ -60,7 +62,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 
         "<header>"
         "<h1>ESP32 Zigbee Gateway</h1>"
-        "<button onclick=\"fetch('/pair')\">Pair Device (60s)</button>"
+        "<button onclick=\"sendPairCommand()\">Pair Device (60s)</button>"
         "<button onclick=\"fetch('/reset')\">Reset Gateway</button>"
         "</header>"
 
@@ -91,6 +93,12 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "log.innerHTML += e.data + '<br>';"
         "log.scrollTop = log.scrollHeight;"
         "};"
+
+        "function sendPairCommand(){"
+        "if(ws.readyState===WebSocket.OPEN){"
+        "ws.send('pair');"
+        "}"
+        "}"
 
         /* load devices */
 
@@ -133,7 +141,51 @@ static esp_err_t ws_handler(httpd_req_t *req)
         ESP_LOGI(TAG, "WebSocket client connected");
 
         web_log_send("WebSocket connected");
+
+        return ESP_OK;
     }
+
+    httpd_ws_frame_t frame = {
+        .type = HTTPD_WS_TYPE_TEXT
+    };
+
+    esp_err_t err = httpd_ws_recv_frame(req, &frame, 0);
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to read WebSocket frame length");
+        return err;
+    }
+
+    if (frame.len == 0)
+        return ESP_OK;
+
+    uint8_t payload[32];
+    if (frame.len >= sizeof(payload))
+    {
+        ESP_LOGW(TAG, "Ignoring oversized WebSocket command");
+        return ESP_OK;
+    }
+
+    frame.payload = payload;
+    err = httpd_ws_recv_frame(req, &frame, frame.len);
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to read WebSocket frame");
+        return err;
+    }
+
+    payload[frame.len] = '\0';
+
+    if (strcmp((char *)payload, PAIR_CMD) == 0)
+    {
+        if (!zigbee_core_start_pairing())
+        {
+            web_log_send("Pair mode already active or unavailable");
+        }
+        return ESP_OK;
+    }
+
+    ESP_LOGW(TAG, "Unknown WebSocket command: %s", (char *)payload);
 
     return ESP_OK;
 }
@@ -149,29 +201,6 @@ static esp_err_t devices_handler(httpd_req_t *req)
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
-
-    return ESP_OK;
-}
-
-/* =========================
-   PAIR MODE
-   ========================= */
-
-static esp_err_t pair_handler(httpd_req_t *req)
-{
-    ESP_LOGI("ZIGBEE", "Pair mode enabled (60s)");
-
-    web_log_send("Pair mode enabled (60s)");
-
-    httpd_resp_sendstr(req, "Pair mode enabled");
-
-    /* burada zigbee permit join çağrısı olacak */
-
-    vTaskDelay(pdMS_TO_TICKS(60000));
-
-    ESP_LOGI("ZIGBEE", "Pair mode disabled");
-
-    web_log_send("Pair mode disabled");
 
     return ESP_OK;
 }
@@ -216,11 +245,6 @@ void web_server_start(void)
             .method = HTTP_GET,
             .handler = devices_handler};
 
-        httpd_uri_t pair = {
-            .uri = "/pair",
-            .method = HTTP_GET,
-            .handler = pair_handler};
-
         httpd_uri_t reset = {
             .uri = "/reset",
             .method = HTTP_GET,
@@ -229,7 +253,6 @@ void web_server_start(void)
         httpd_register_uri_handler(server, &root);
         httpd_register_uri_handler(server, &ws);
         httpd_register_uri_handler(server, &devices);
-        httpd_register_uri_handler(server, &pair);
         httpd_register_uri_handler(server, &reset);
 
         ESP_LOGI(TAG, "Web server started");

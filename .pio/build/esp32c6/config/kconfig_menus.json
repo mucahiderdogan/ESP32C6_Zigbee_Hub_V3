@@ -37265,6 +37265,123 @@
                 "id": "component-config-wi-fi-provisioning-manager",
                 "title": "Wi-Fi Provisioning Manager",
                 "type": "menu"
+            },
+            {
+                "children": [
+                    {
+                        "children": [
+                            {
+                                "children": [
+                                    {
+                                        "children": [],
+                                        "depends_on": "<choice ZB_DEVICE_TYPE>",
+                                        "help": "Select this to enable Zigbee Coordinator or Router.",
+                                        "id": "ZB_ZCZR",
+                                        "name": "ZB_ZCZR",
+                                        "range": null,
+                                        "title": "Zigbee Coordinator or Router device",
+                                        "type": "bool"
+                                    },
+                                    {
+                                        "children": [],
+                                        "depends_on": "<choice ZB_DEVICE_TYPE>",
+                                        "help": "Select this to enable Zigbee End Device.",
+                                        "id": "ZB_ZED",
+                                        "name": "ZB_ZED",
+                                        "range": null,
+                                        "title": "Zigbee End Device",
+                                        "type": "bool"
+                                    },
+                                    {
+                                        "children": [],
+                                        "depends_on": "SOC_IEEE802154_SUPPORTED && <choice ZB_DEVICE_TYPE>",
+                                        "help": "Select this to enable Zigbee Green Power Device.",
+                                        "id": "ZB_ZGPD",
+                                        "name": "ZB_ZGPD",
+                                        "range": null,
+                                        "title": "Zigbee Green power device",
+                                        "type": "bool"
+                                    }
+                                ],
+                                "depends_on": "ZB_ENABLED",
+                                "help": "Configure the Zigbee device type",
+                                "id": "component-config-zigbee-zigbee-enable-configure-the-zigbee-device-type",
+                                "name": "ZB_DEVICE_TYPE",
+                                "title": "Configure the Zigbee device type",
+                                "type": "choice"
+                            },
+                            {
+                                "children": [
+                                    {
+                                        "children": [],
+                                        "depends_on": "<choice ZB_RADIO_TYPE>",
+                                        "help": "Select this to use the native 15.4 radio.",
+                                        "id": "ZB_RADIO_NATIVE",
+                                        "name": "ZB_RADIO_NATIVE",
+                                        "range": null,
+                                        "title": "Native 15.4 radio",
+                                        "type": "bool"
+                                    },
+                                    {
+                                        "children": [],
+                                        "depends_on": "<choice ZB_RADIO_TYPE>",
+                                        "help": "Select this to connect to a Radio Co-Processor via Spinel UART.",
+                                        "id": "ZB_RADIO_SPINEL_UART",
+                                        "name": "ZB_RADIO_SPINEL_UART",
+                                        "range": null,
+                                        "title": "Connect to 15.4 radio via Radio Spinel UART",
+                                        "type": "bool"
+                                    }
+                                ],
+                                "depends_on": "ZB_ENABLED",
+                                "help": null,
+                                "id": "component-config-zigbee-zigbee-enable-configure-the-zigbee-radio-type",
+                                "name": "ZB_RADIO_TYPE",
+                                "title": "Configure the Zigbee radio type",
+                                "type": "choice"
+                            },
+                            {
+                                "children": [
+                                    {
+                                        "children": [],
+                                        "depends_on": "(ZB_ZCZR || ZB_ZGPD) && SOC_IEEE802154_SUPPORTED && ZB_ENABLED",
+                                        "help": "when enable green power, example would support as green power proxy(zczr default enabled), green power combo or just green power device.",
+                                        "id": "ZB_GP_ENABLED",
+                                        "name": "ZB_GP_ENABLED",
+                                        "range": null,
+                                        "title": "Zigbee Green Power enable",
+                                        "type": "bool"
+                                    }
+                                ],
+                                "depends_on": "ZB_ENABLED",
+                                "id": "component-config-zigbee-zigbee-enable-zigbee-example",
+                                "title": "Zigbee Example",
+                                "type": "menu"
+                            },
+                            {
+                                "children": [],
+                                "depends_on": "ZB_ENABLED",
+                                "help": "Setting Zigbee stack debug mode.",
+                                "id": "ZB_DEBUG_MODE",
+                                "name": "ZB_DEBUG_MODE",
+                                "range": null,
+                                "title": "Zigbee Debug Mode",
+                                "type": "bool"
+                            }
+                        ],
+                        "depends_on": null,
+                        "help": "Select this option to enable Zigbee and show the submenu with Zigbee configuration choices.",
+                        "id": "ZB_ENABLED",
+                        "name": "ZB_ENABLED",
+                        "range": null,
+                        "title": "Zigbee Enable",
+                        "type": "bool"
+                    }
+                ],
+                "depends_on": null,
+                "id": "component-config-zigbee",
+                "title": "Zigbee",
+                "type": "menu"
             }
         ],
         "depends_on": null,
