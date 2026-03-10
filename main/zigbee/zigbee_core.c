@@ -11,8 +11,16 @@
 #include "esp_wifi.h"
 #include "esp_zigbee_core.h"
 #include "ha/esp_zigbee_ha_standard.h"
+#include "zcl/esp_zigbee_zcl_command.h"
+#include "zcl/esp_zigbee_zcl_common.h"
+#include "zcl/esp_zigbee_zcl_core.h"
+#include "zdo/esp_zigbee_zdo_command.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #define ZIGBEE_MAX_CHILDREN 10
 #define ZIGBEE_NETWORK_SIZE 64
@@ -31,6 +39,12 @@
         },                                   \
     }
 
+typedef struct {
+    uint16_t short_addr;
+    uint8_t endpoint;
+    char ieee[32];
+} zigbee_discovery_ctx_t;
+
 static const char *TAG = "ZIGBEE";
 
 static bool pairing_active;
@@ -46,38 +60,208 @@ static void zigbee_format_ieee(const uint8_t *ieee_addr, char *buffer, size_t bu
              ieee_addr[3], ieee_addr[2], ieee_addr[1], ieee_addr[0]);
 }
 
+static bool zigbee_has_cluster(const esp_zb_af_simple_desc_1_1_t *simple_desc, uint16_t cluster_id)
+{
+    uint8_t count = simple_desc->app_input_cluster_count + simple_desc->app_output_cluster_count;
+
+    for (uint8_t i = 0; i < count; i++) {
+        if (simple_desc->app_cluster_list[i] == cluster_id) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void zigbee_build_features(const esp_zb_af_simple_desc_1_1_t *simple_desc,
+                                  char *buffer,
+                                  size_t buffer_len)
+{
+    size_t offset = 0;
+    uint8_t count = simple_desc->app_input_cluster_count + simple_desc->app_output_cluster_count;
+
+    for (uint8_t i = 0; i < count && offset < buffer_len; i++) {
+        offset += snprintf(buffer + offset,
+                           buffer_len - offset,
+                           "%s0x%04X",
+                           (i == 0) ? "" : ",",
+                           simple_desc->app_cluster_list[i]);
+    }
+}
+
+static const char *zigbee_infer_type(const esp_zb_af_simple_desc_1_1_t *simple_desc)
+{
+    if (zigbee_has_cluster(simple_desc, ESP_ZB_ZCL_CLUSTER_ID_COLOR_CONTROL) ||
+        zigbee_has_cluster(simple_desc, ESP_ZB_ZCL_CLUSTER_ID_LEVEL_CONTROL)) {
+        return "light";
+    }
+
+    if (zigbee_has_cluster(simple_desc, ESP_ZB_ZCL_CLUSTER_ID_ON_OFF)) {
+        return "switch";
+    }
+
+    if (zigbee_has_cluster(simple_desc, ESP_ZB_ZCL_CLUSTER_ID_IAS_ZONE) ||
+        zigbee_has_cluster(simple_desc, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING)) {
+        return "binary_sensor";
+    }
+
+    if (zigbee_has_cluster(simple_desc, ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT) ||
+        zigbee_has_cluster(simple_desc, ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT) ||
+        zigbee_has_cluster(simple_desc, ESP_ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT) ||
+        zigbee_has_cluster(simple_desc, ESP_ZB_ZCL_CLUSTER_ID_ILLUMINANCE_MEASUREMENT) ||
+        zigbee_has_cluster(simple_desc, ESP_ZB_ZCL_CLUSTER_ID_ELECTRICAL_MEASUREMENT)) {
+        return "sensor";
+    }
+
+    if (zigbee_has_cluster(simple_desc, ESP_ZB_ZCL_CLUSTER_ID_THERMOSTAT)) {
+        return "climate";
+    }
+
+    if (zigbee_has_cluster(simple_desc, ESP_ZB_ZCL_CLUSTER_ID_WINDOW_COVERING)) {
+        return "cover";
+    }
+
+    return "zigbee";
+}
+
+static void zigbee_request_basic_attributes(const zigbee_discovery_ctx_t *ctx)
+{
+    static uint16_t attr_ids[] = {
+        ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID,
+        ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID,
+    };
+
+    esp_zb_zcl_read_attr_cmd_t cmd_req = {
+        .zcl_basic_cmd = {
+            .dst_addr_u.addr_short = ctx->short_addr,
+            .dst_endpoint = ctx->endpoint,
+            .src_endpoint = ZIGBEE_GATEWAY_ENDPOINT,
+        },
+        .address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT,
+        .clusterID = ESP_ZB_ZCL_CLUSTER_ID_BASIC,
+        .direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_SRV,
+        .dis_default_resp = 1,
+        .manuf_specific = 0,
+        .manuf_code = EZP_ZB_ZCL_CLUSTER_NON_MANUFACTURER_SPECIFIC,
+        .attr_number = 2,
+        .attr_field = attr_ids,
+    };
+
+    esp_zb_zcl_read_attr_cmd_req(&cmd_req);
+}
+
+static void zigbee_simple_desc_cb(esp_zb_zdp_status_t zdo_status,
+                                  esp_zb_af_simple_desc_1_1_t *simple_desc,
+                                  void *user_ctx)
+{
+    zigbee_discovery_ctx_t *ctx = user_ctx;
+
+    if (ctx == NULL) {
+        return;
+    }
+
+    if (zdo_status == ESP_ZB_ZDP_STATUS_SUCCESS && simple_desc != NULL) {
+        char features[128] = {0};
+        const char *type = zigbee_infer_type(simple_desc);
+
+        zigbee_build_features(simple_desc, features, sizeof(features));
+        device_manager_update_details(ctx->ieee,
+                                      ctx->short_addr,
+                                      simple_desc->endpoint,
+                                      simple_desc->app_profile_id,
+                                      simple_desc->app_device_id,
+                                      type,
+                                      NULL,
+                                      NULL,
+                                      features);
+
+        ESP_LOGI(TAG,
+                 "Discovered %s ep=%u profile=0x%04x device=0x%04x clusters=%s",
+                 ctx->ieee,
+                 simple_desc->endpoint,
+                 simple_desc->app_profile_id,
+                 simple_desc->app_device_id,
+                 features);
+
+        ctx->endpoint = simple_desc->endpoint;
+        zigbee_request_basic_attributes(ctx);
+    } else {
+        ESP_LOGW(TAG, "Simple descriptor request failed for %s, status=%d", ctx->ieee, zdo_status);
+    }
+
+    free(ctx);
+}
+
+static void zigbee_active_ep_cb(esp_zb_zdp_status_t zdo_status,
+                                uint8_t ep_count,
+                                uint8_t *ep_id_list,
+                                void *user_ctx)
+{
+    zigbee_discovery_ctx_t *ctx = user_ctx;
+
+    if (ctx == NULL) {
+        return;
+    }
+
+    if (zdo_status != ESP_ZB_ZDP_STATUS_SUCCESS || ep_count == 0 || ep_id_list == NULL) {
+        ESP_LOGW(TAG, "Active endpoint discovery failed for %s, status=%d", ctx->ieee, zdo_status);
+        free(ctx);
+        return;
+    }
+
+    ctx->endpoint = ep_id_list[0];
+
+    esp_zb_zdo_simple_desc_req_param_t req = {
+        .addr_of_interest = ctx->short_addr,
+        .endpoint = ctx->endpoint,
+    };
+
+    esp_zb_zdo_simple_desc_req(&req, zigbee_simple_desc_cb, ctx);
+}
+
+static void zigbee_request_device_details(uint16_t short_addr, const char *ieee)
+{
+    zigbee_discovery_ctx_t *ctx = calloc(1, sizeof(zigbee_discovery_ctx_t));
+
+    if (ctx == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate discovery context");
+        return;
+    }
+
+    ctx->short_addr = short_addr;
+    snprintf(ctx->ieee, sizeof(ctx->ieee), "%s", ieee);
+
+    esp_zb_zdo_active_ep_req_param_t req = {
+        .addr_of_interest = short_addr,
+    };
+
+    esp_zb_zdo_active_ep_req(&req, zigbee_active_ep_cb, ctx);
+}
+
 static void zigbee_register_joined_device(uint16_t short_addr)
 {
     uint8_t ieee_addr[8] = {0};
     char ieee_string[17];
     char device_name[32];
 
-    if (esp_zb_ieee_address_by_short(short_addr, ieee_addr) != ESP_OK)
-    {
+    if (esp_zb_ieee_address_by_short(short_addr, ieee_addr) != ESP_OK) {
         ESP_LOGW(TAG, "Failed to resolve IEEE address for short 0x%04hx", short_addr);
         return;
     }
 
     zigbee_format_ieee(ieee_addr, ieee_string, sizeof(ieee_string));
+    snprintf(device_name, sizeof(device_name), "Zigbee %04X", short_addr);
 
-    if (device_manager_find_by_ieee(ieee_string) >= 0)
-    {
-        ESP_LOGI(TAG, "Known device rejoined: %s", ieee_string);
+    if (device_manager_add(device_name, "zigbee", ieee_string) >= 0) {
+        ESP_LOGI(TAG, "Registered joined device %s", ieee_string);
+        web_log_send("Zigbee device joined");
+    } else {
+        ESP_LOGW(TAG, "Device registry full, cannot add %s", ieee_string);
+        web_log_send("Device registry full");
         return;
     }
 
-    snprintf(device_name, sizeof(device_name), "Zigbee %04X", short_addr);
-    if (device_manager_add(device_name, "zigbee", ieee_string) >= 0)
-    {
-        ESP_LOGI(TAG, "Registered joined device %s", ieee_string);
-        web_log_send("Zigbee device joined");
-        mqtt_publish_joined_device(device_name, ieee_string);
-    }
-    else
-    {
-        ESP_LOGW(TAG, "Device registry full, cannot add %s", ieee_string);
-        web_log_send("Device registry full");
-    }
+    zigbee_request_device_details(short_addr, ieee_string);
 }
 
 static void zigbee_start_bdb_commissioning(uint8_t mode_mask)
@@ -86,6 +270,81 @@ static void zigbee_start_bdb_commissioning(uint8_t mode_mask)
                         ,
                         TAG,
                         "Failed to start Zigbee BDB commissioning");
+}
+
+static void zigbee_copy_zcl_string(char *dest, size_t dest_len, const void *value_ptr)
+{
+    const uint8_t *zb_str = value_ptr;
+    size_t length;
+
+    if (dest_len == 0 || value_ptr == NULL) {
+        return;
+    }
+
+    length = zb_str[0];
+    if (length >= dest_len) {
+        length = dest_len - 1;
+    }
+
+    memcpy(dest, zb_str + 1, length);
+    dest[length] = '\0';
+}
+
+static esp_err_t zigbee_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message)
+{
+    if (callback_id == ESP_ZB_CORE_CMD_READ_ATTR_RESP_CB_ID) {
+        const esp_zb_zcl_cmd_read_attr_resp_message_t *resp = message;
+        esp_zb_zcl_read_attr_resp_variable_t *var;
+        char ieee[17] = {0};
+        char manufacturer[32] = {0};
+        char model[32] = {0};
+        uint8_t ieee_addr[8] = {0};
+
+        if (resp == NULL || resp->info.src_address.addr_type != ESP_ZB_ZCL_ADDR_TYPE_SHORT) {
+            return ESP_OK;
+        }
+
+        if (esp_zb_ieee_address_by_short(resp->info.src_address.u.short_addr, ieee_addr) != ESP_OK) {
+            return ESP_OK;
+        }
+
+        zigbee_format_ieee(ieee_addr, ieee, sizeof(ieee));
+
+        for (var = resp->variables; var != NULL; var = var->next) {
+            if (var->status != ESP_ZB_ZCL_STATUS_SUCCESS) {
+                continue;
+            }
+
+            if (var->attribute.id == ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID) {
+                zigbee_copy_zcl_string(manufacturer, sizeof(manufacturer), var->attribute.data.value);
+            } else if (var->attribute.id == ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID) {
+                zigbee_copy_zcl_string(model, sizeof(model), var->attribute.data.value);
+            }
+        }
+
+        device_manager_update_details(ieee,
+                                      resp->info.src_address.u.short_addr,
+                                      resp->info.src_endpoint,
+                                      0,
+                                      0,
+                                      NULL,
+                                      manufacturer,
+                                      model,
+                                      NULL);
+
+        if (manufacturer[0] != '\0' || model[0] != '\0') {
+            ESP_LOGI(TAG, "Device %s manufacturer=%s model=%s", ieee, manufacturer, model);
+        }
+
+        if (device_manager_find_by_ieee(ieee) >= 0) {
+            device_t *device = device_manager_get(device_manager_find_by_ieee(ieee));
+            if (device != NULL) {
+                mqtt_publish_joined_device(device->name, device->ieee);
+            }
+        }
+    }
+
+    return ESP_OK;
 }
 
 void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
@@ -238,6 +497,7 @@ void zigbee_core_init(void)
     };
 
     ESP_ERROR_CHECK(esp_zb_platform_config(&platform_config));
+    esp_zb_core_action_handler_register(zigbee_action_handler);
     xTaskCreate(zigbee_task, "Zigbee_main", 8192, NULL, 5, NULL);
 
     ESP_LOGI(TAG, "Core initialized on channel %d", ZIGBEE_CHANNEL);

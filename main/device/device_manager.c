@@ -109,6 +109,47 @@ int device_manager_find_by_ieee(const char *ieee)
     return -1;
 }
 
+int device_manager_update_details(const char *ieee,
+                                  uint16_t short_addr,
+                                  uint8_t endpoint,
+                                  uint16_t profile_id,
+                                  uint16_t device_id,
+                                  const char *type,
+                                  const char *manufacturer,
+                                  const char *model,
+                                  const char *features)
+{
+    int index = device_manager_find_by_ieee(ieee);
+
+    if (index < 0) {
+        return -1;
+    }
+
+    devices[index].short_addr = short_addr;
+    devices[index].endpoint = endpoint;
+    devices[index].profile_id = profile_id;
+    devices[index].device_id = device_id;
+
+    if (type != NULL && type[0] != '\0') {
+        snprintf(devices[index].type, sizeof(devices[index].type), "%s", type);
+    }
+
+    if (manufacturer != NULL && manufacturer[0] != '\0') {
+        snprintf(devices[index].manufacturer, sizeof(devices[index].manufacturer), "%s", manufacturer);
+    }
+
+    if (model != NULL && model[0] != '\0') {
+        snprintf(devices[index].model, sizeof(devices[index].model), "%s", model);
+    }
+
+    if (features != NULL && features[0] != '\0') {
+        snprintf(devices[index].features, sizeof(devices[index].features), "%s", features);
+    }
+
+    device_manager_save();
+    return index;
+}
+
 bool device_manager_is_control(const device_t *device)
 {
     if (device == NULL) {
@@ -141,10 +182,16 @@ void device_manager_get_json(char *buffer, int max_len)
     for (int i = 0; i < device_count; i++) {
         offset += snprintf(buffer + offset,
                            max_len - offset,
-                           "{ \"name\":\"%s\", \"type\":\"%s\", \"ieee\":\"%s\" }%s",
+                           "{ \"name\":\"%s\", \"type\":\"%s\", \"ieee\":\"%s\", \"manufacturer\":\"%s\", \"model\":\"%s\", \"features\":\"%s\", \"endpoint\":%u, \"short_addr\":%u, \"device_id\":%u }%s",
                            devices[i].name,
                            devices[i].type,
                            devices[i].ieee,
+                           devices[i].manufacturer,
+                           devices[i].model,
+                           devices[i].features,
+                           devices[i].endpoint,
+                           devices[i].short_addr,
+                           devices[i].device_id,
                            (i < device_count - 1) ? "," : "");
     }
 

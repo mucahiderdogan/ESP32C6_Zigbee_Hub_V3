@@ -72,6 +72,7 @@ static void mqtt_publish_ha_joined_sensor(const char *name, const char *ieee)
              "\"name\":\"%s\","
              "\"unique_id\":\"zigbee_%s\","
              "\"state_topic\":\"gateway/device/%s/state\","
+             "\"json_attributes_topic\":\"gateway/device/%s/attributes\","
              "\"entity_category\":\"diagnostic\","
              "\"icon\":\"mdi:zigbee\","
              "\"device\":{"
@@ -80,6 +81,7 @@ static void mqtt_publish_ha_joined_sensor(const char *name, const char *ieee)
              "}"
              "}",
              name,
+             ieee,
              ieee,
              ieee,
              name,
@@ -234,16 +236,51 @@ void mqtt_publish_all_discovery(void)
 
 void mqtt_publish_joined_device(const char *name, const char *ieee)
 {
+    device_t *device = NULL;
     char topic[128];
+    char payload[512];
+    int index;
 
     if (client == NULL) {
         return;
     }
 
+    index = device_manager_find_by_ieee(ieee);
+    if (index >= 0) {
+        device = device_manager_get(index);
+    }
+
     mqtt_publish_ha_joined_sensor(name, ieee);
 
     snprintf(topic, sizeof(topic), "gateway/device/%s/state", ieee);
-    mqtt_publish_text_state(topic, "joined", true);
+    mqtt_publish_text_state(topic, (device && device->type[0] != '\0') ? device->type : "joined", true);
+
+    if (device != NULL) {
+        snprintf(topic, sizeof(topic), "gateway/device/%s/attributes", ieee);
+        snprintf(payload,
+                 sizeof(payload),
+                 "{"
+                 "\"name\":\"%s\","
+                 "\"type\":\"%s\","
+                 "\"manufacturer\":\"%s\","
+                 "\"model\":\"%s\","
+                 "\"features\":\"%s\","
+                 "\"short_addr\":%u,"
+                 "\"endpoint\":%u,"
+                 "\"profile_id\":%u,"
+                 "\"device_id\":%u"
+                 "}",
+                 device->name,
+                 device->type,
+                 device->manufacturer,
+                 device->model,
+                 device->features,
+                 device->short_addr,
+                 device->endpoint,
+                 device->profile_id,
+                 device->device_id);
+        mqtt_publish_text_state(topic, payload, true);
+    }
 }
 
 void mqtt_publish_pair_state(bool active)
