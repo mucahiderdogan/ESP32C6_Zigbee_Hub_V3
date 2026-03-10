@@ -1,9 +1,5 @@
-
 #pragma once
 
-#include <stdbool.h>
-#include <stdint.h>
-
 void wifi_init(void);
-bool wifi_is_connected(void);
-bool wifi_wait_connected(uint32_t timeout_ms);
+void wifi_wait_connected(void);
+int wifi_is_connected(void);
