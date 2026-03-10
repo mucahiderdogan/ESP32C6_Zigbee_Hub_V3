@@ -1,29 +1,33 @@
-
-#include "core/event_bus.h"
-#include "config/config_manager.h"
-#include "network/wifi_manager.h"
-#include "zigbee/zigbee_core.h"
-#include "device/device_manager.h"
-#include "bridge/mqtt_bridge.h"
-#include "services/web_server.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 
-static const char *TAG = "gateway";
+#include "wifi_manager.h"
+#include "mqtt_bridge.h"
+#include "web_server.h"
+
+static const char *TAG = "SYSTEM";
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Gateway starting...");
-    
-    nvs_flash_init();
+    ESP_ERROR_CHECK(nvs_flash_init());
 
-    config_manager_init();
-    event_bus_init();
+    ESP_LOGI(TAG, "Gateway starting...");
+
     wifi_manager_init();
 
-    device_manager_init();
-    zigbee_core_init();
+    ESP_LOGI(TAG, "Waiting for WiFi...");
+
+    xEventGroupWaitBits(
+        wifi_event_group,
+        WIFI_CONNECTED_BIT,
+        pdFALSE,
+        pdTRUE,
+        portMAX_DELAY
+    );
+
+    ESP_LOGI(TAG, "Network ready");
 
     mqtt_bridge_start();
+
     web_server_start();
 }
