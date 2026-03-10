@@ -1,0 +1,1 @@
+void config_manager_init(void);

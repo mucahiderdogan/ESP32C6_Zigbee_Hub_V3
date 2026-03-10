@@ -1,0 +1,1 @@
+void device_manager_init(void);

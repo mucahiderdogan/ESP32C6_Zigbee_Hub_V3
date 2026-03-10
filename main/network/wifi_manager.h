@@ -1,0 +1,1 @@
+void wifi_manager_init(void);

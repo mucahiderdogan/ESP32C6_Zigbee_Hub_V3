@@ -1,26 +1,27 @@
-# ESP32-C6 Zigbee Gateway
 
-ESP32-C6 based Zigbee Coordinator and MQTT Gateway.
+ESP32-C6 Zigbee → MQTT Gateway (Current Architecture State)
 
-## Features
+This project represents the CURRENT DEVELOPMENT STATE discussed:
 
-- Zigbee coordinator (ESP Zigbee stack)
-- MQTT bridge
-- Zigbee device database
-- Cluster parser
-- Home Assistant auto discovery
-- JSON state publish
-- Web dashboard
-- OTA firmware update
-- Watchdog reconnect
+Modules included as architecture placeholders:
 
-## Build
+1. Configuration Manager
+2. WiFi Manager
+3. Zigbee Core (placeholder)
+4. Device Manager
+5. MQTT Bridge
+6. Web Server
+7. Event Bus
 
-Requires:
+Future modules planned:
 
-- PlatformIO
-- ESP-IDF
-- ESP32-C6 board
+- Zigbee Event Adapter
+- Device Profile Loader
+- Converter Engine
+- MQTT Topic Engine
+- Home Assistant Discovery
+- Mesh Stability System
+- Web Dashboard UI
 
-```bash
-pio run
+Framework: ESP-IDF via PlatformIO
+Target: ESP32-C6

@@ -1,20 +1,27 @@
-#include "wifi.h"
-#include "mqtt.h"
-#include "zigbee.h"
-#include "esp_log.h"
 
-static const char *TAG = "main";
+#include "core/event_bus.h"
+#include "config/config_manager.h"
+#include "network/wifi_manager.h"
+#include "zigbee/zigbee_core.h"
+#include "device/device_manager.h"
+#include "bridge/mqtt_bridge.h"
+#include "services/web_server.h"
+#include "esp_log.h"
+#include "nvs_flash.h"
+
+static const char *TAG = "gateway";
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "ESP32-C6 Zigbee Gateway starting");
+    nvs_flash_init();
 
-    wifi_init();
+    config_manager_init();
+    event_bus_init();
+    wifi_manager_init();
 
-    /* wifi bağlanmasını bekle */
-    wifi_wait_connected();
+    device_manager_init();
+    zigbee_core_init();
 
-    mqtt_start();
-
-    zigbee_init();
+    mqtt_bridge_start();
+    web_server_start();
 }

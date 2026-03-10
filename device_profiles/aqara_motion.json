@@ -1,0 +1,11 @@
+{
+  "model": "Aqara Motion Sensor",
+  "clusters": [
+    "occupancy",
+    "battery"
+  ],
+  "exposes": [
+    "motion",
+    "battery"
+  ]
+}

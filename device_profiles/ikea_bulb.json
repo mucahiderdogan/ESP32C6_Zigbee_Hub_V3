@@ -1,0 +1,11 @@
+{
+  "model": "TRADFRI bulb",
+  "clusters": [
+    "on_off",
+    "level_control"
+  ],
+  "exposes": [
+    "state",
+    "brightness"
+  ]
+}

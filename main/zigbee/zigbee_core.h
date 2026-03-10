@@ -1,0 +1,1 @@
+void zigbee_core_init(void);
