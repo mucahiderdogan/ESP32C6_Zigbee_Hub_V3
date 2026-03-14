@@ -1,5 +1,6 @@
 #include "web_server.h"
 #include "device_manager.h"
+#include "mqtt_bridge.h"
 #include "zigbee_core.h"
 
 #include "esp_http_server.h"
@@ -7,6 +8,8 @@
 #include "esp_netif.h"
 #include "esp_system.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const char *TAG = "WEB";
@@ -48,13 +51,11 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "<style>"
         "body{font-family:Arial;background:#111;color:#eee;margin:0}"
         "header{padding:20px;text-align:center;background:#222}"
-        ".container{display:flex;height:90vh}"
-        ".devices{width:40%;border-right:1px solid #333;padding:20px}"
-        ".logs{width:60%;padding:20px}"
-        "button{width:200px;height:50px;font-size:18px;margin-bottom:20px}"
+        ".container{padding:20px}"
+        ".devices{width:100%}"
+        "button{padding:6px 10px;font-size:14px}"
         "table{width:100%;border-collapse:collapse}"
         "th,td{border-bottom:1px solid #333;padding:10px;text-align:left}"
-        "#log{background:#000;color:#0f0;height:80%;overflow:auto;padding:10px}"
         "</style>"
         "</head>"
 
@@ -62,8 +63,6 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 
         "<header>"
         "<h1>ESP32 Zigbee Gateway</h1>"
-        "<button onclick=\"sendPairCommand()\">Pair Device (60s)</button>"
-        "<button onclick=\"fetch('/reset')\">Reset Gateway</button>"
         "</header>"
 
         "<div class='container'>"
@@ -71,33 +70,17 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "<div class='devices'>"
         "<h2>Devices</h2>"
         "<table id='devices'>"
-        "<tr><th>Name</th><th>Type</th></tr>"
+        "<tr><th>Name</th><th>Type</th><th>Status</th><th>Action</th></tr>"
         "</table>"
-        "</div>"
-
-        "<div class='logs'>"
-        "<h2>Logs</h2>"
-        "<div id='log'></div>"
         "</div>"
 
         "</div>"
 
         "<script>"
 
-        /* websocket */
-
-        "let ws = new WebSocket('ws://' + location.host + '/ws');"
-
-        "ws.onmessage = function(e){"
-        "let log=document.getElementById('log');"
-        "log.innerHTML += e.data + '<br>';"
-        "log.scrollTop = log.scrollHeight;"
-        "};"
-
-        "function sendPairCommand(){"
-        "if(ws.readyState===WebSocket.OPEN){"
-        "ws.send('pair');"
-        "}"
+        "function deleteDevice(ieee){"
+        "fetch('/device/delete?ieee='+encodeURIComponent(ieee),{method:'POST'})"
+        ".then(()=>loadDevices());"
         "}"
 
         /* load devices */
@@ -105,9 +88,13 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "function loadDevices(){"
         "fetch('/devices').then(r=>r.json()).then(data=>{"
         "let table=document.getElementById('devices');"
-        "table.innerHTML='<tr><th>Name</th><th>Type</th></tr>';"
+        "table.innerHTML='<tr><th>Name</th><th>Type</th><th>Status</th><th>Action</th></tr>';"
         "data.devices.forEach(d=>{"
-        "let row='<tr><td>'+d.name+'</td><td>'+d.type+'</td></tr>';"
+        "if(d.ieee && d.ieee.startsWith('ctrl_')){ return; }"
+        "let status=d.online?'online':'offline';"
+        "if(d.last_seen_s>0){status+=' ('+d.last_seen_s+'s)';}"
+        "let action=(d.ieee && d.ieee.startsWith('ctrl_'))?'':'<button onclick=\"deleteDevice(\\''+d.ieee+'\\')\">Delete</button>';"
+        "let row='<tr><td>'+d.name+'</td><td>'+d.type+'</td><td>'+status+'</td><td>'+action+'</td></tr>';"
         "table.innerHTML+=row;"
         "});"
         "});"
@@ -195,26 +182,107 @@ static esp_err_t ws_handler(httpd_req_t *req)
    ========================= */
 static esp_err_t devices_handler(httpd_req_t *req)
 {
-    char json[1024];
+    char *json = malloc(4096);
+    int offset = 0;
+    int count;
 
-    device_manager_get_json(json, sizeof(json));
+    if (json == NULL) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "Out of memory");
+        return ESP_OK;
+    }
+
+    offset += snprintf(json + offset, 4096 - offset, "{ \"devices\": [");
+    count = device_manager_count();
+
+    for (int i = 0; i < count && offset < 3900; i++) {
+        device_t *device = device_manager_get(i);
+        bool online;
+        uint32_t last_seen_s;
+
+        if (device == NULL) {
+            continue;
+        }
+
+        online = zigbee_core_is_device_online(device->ieee);
+        last_seen_s = zigbee_core_device_last_seen_seconds(device->ieee);
+
+        offset += snprintf(json + offset,
+                           4096 - offset,
+                           "{ \"name\":\"%s\", \"type\":\"%s\", \"ieee\":\"%s\", \"manufacturer\":\"%s\", \"model\":\"%s\", \"features\":\"%s\", \"endpoint\":%u, \"short_addr\":%u, \"device_id\":%u, \"online\":%s, \"last_seen_s\":%lu }%s",
+                           device->name,
+                           device->type,
+                           device->ieee,
+                           device->manufacturer,
+                           device->model,
+                           device->features,
+                           device->endpoint,
+                           device->short_addr,
+                           device->device_id,
+                           online ? "true" : "false",
+                           (unsigned long)last_seen_s,
+                           (i < count - 1) ? "," : "");
+    }
+
+    snprintf(json + offset, 4096 - offset, "] }");
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+    free(json);
 
     return ESP_OK;
 }
 
-static esp_err_t reset_handler(httpd_req_t *req)
+static esp_err_t device_delete_handler(httpd_req_t *req)
 {
-    httpd_resp_sendstr(req, "Restarting gateway...");
+    char query[96];
+    char ieee[32];
+    int index;
+    device_t *device;
+    int query_len = httpd_req_get_url_query_len(req);
 
-    web_log_send("Gateway restarting");
+    if (query_len <= 0 || query_len >= (int)sizeof(query)) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_sendstr(req, "Missing query");
+        return ESP_OK;
+    }
 
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "ieee", ieee, sizeof(ieee)) != ESP_OK) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_sendstr(req, "Missing ieee");
+        return ESP_OK;
+    }
 
-    esp_restart();
+    index = device_manager_find_by_ieee(ieee);
+    device = (index >= 0) ? device_manager_get(index) : NULL;
+    if (device == NULL) {
+        httpd_resp_set_status(req, "404 Not Found");
+        httpd_resp_sendstr(req, "Device not found");
+        return ESP_OK;
+    }
 
+    if (device_manager_is_control(device)) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_sendstr(req, "Default devices cannot be deleted");
+        return ESP_OK;
+    }
+
+    if (!device_manager_remove_by_ieee(ieee)) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "Delete failed");
+        return ESP_OK;
+    }
+
+    {
+        char json[1024];
+
+        device_manager_get_json(json, sizeof(json));
+        mqtt_publish_devices(json);
+    }
+
+    web_log_send("Device deleted");
+    httpd_resp_sendstr(req, "OK");
     return ESP_OK;
 }
 
@@ -245,15 +313,15 @@ void web_server_start(void)
             .method = HTTP_GET,
             .handler = devices_handler};
 
-        httpd_uri_t reset = {
-            .uri = "/reset",
-            .method = HTTP_GET,
-            .handler = reset_handler};
+        httpd_uri_t device_delete = {
+            .uri = "/device/delete",
+            .method = HTTP_POST,
+            .handler = device_delete_handler};
 
         httpd_register_uri_handler(server, &root);
         httpd_register_uri_handler(server, &ws);
         httpd_register_uri_handler(server, &devices);
-        httpd_register_uri_handler(server, &reset);
+        httpd_register_uri_handler(server, &device_delete);
 
         ESP_LOGI(TAG, "Web server started");
 

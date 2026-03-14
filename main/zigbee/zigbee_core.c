@@ -5,15 +5,18 @@
 #include "mqtt_bridge.h"
 #include "web_server.h"
 
-#include "esp_coexist.h"
 #include "esp_check.h"
+#include "esp_coexist.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "esp_zigbee_core.h"
 #include "ha/esp_zigbee_ha_standard.h"
 #include "zcl/esp_zigbee_zcl_command.h"
 #include "zcl/esp_zigbee_zcl_common.h"
 #include "zcl/esp_zigbee_zcl_core.h"
+#include "zcl/esp_zigbee_zcl_ias_zone.h"
+#include "zcl/esp_zigbee_zcl_occupancy_sensing.h"
 #include "zdo/esp_zigbee_zdo_command.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -26,9 +29,10 @@
 #define ZIGBEE_NETWORK_SIZE 64
 #define ZIGBEE_MANUFACTURER_CODE 0x131B
 #define ZIGBEE_MANUFACTURER_NAME "\x09""ESPRESSIF"
-#define ZIGBEE_MODEL_IDENTIFIER "\x09""ESP32C6Hub"
+#define ZIGBEE_MODEL_IDENTIFIER "\x0A""ESP32C6Hub"
 #define ZIGBEE_GATEWAY_ENDPOINT 1
 #define ZIGBEE_PRIMARY_CHANNEL_MASK (1UL << ZIGBEE_CHANNEL)
+#define ZIGBEE_DEVICE_ONLINE_TIMEOUT_S 120
 
 #define ZIGBEE_COORDINATOR_CONFIG()          \
     {                                        \
@@ -45,11 +49,42 @@ typedef struct {
     char ieee[32];
 } zigbee_discovery_ctx_t;
 
+typedef enum {
+    ZIGBEE_PRESENCE_SOURCE_UNKNOWN = 0,
+    ZIGBEE_PRESENCE_SOURCE_OCCUPANCY = 1,
+    ZIGBEE_PRESENCE_SOURCE_IAS = 2,
+} zigbee_presence_source_t;
+
+typedef struct {
+    bool used;
+    bool online;
+    bool known;
+    bool occupied;
+    int64_t last_seen_us;
+    int64_t last_change_us;
+    char ieee[17];
+} zigbee_presence_state_t;
+
 static const char *TAG = "ZIGBEE";
 
 static bool pairing_active;
 static bool zigbee_ready;
 static bool zigbee_started;
+static zigbee_presence_state_t presence_states[MAX_DEVICES];
+
+static void zigbee_format_ieee(const uint8_t *ieee_addr, char *buffer, size_t buffer_len);
+static bool zigbee_ieee_by_short(uint16_t short_addr, char *ieee, size_t ieee_len);
+static zigbee_presence_state_t *zigbee_presence_find(const char *ieee);
+static zigbee_presence_state_t *zigbee_presence_slot(const char *ieee);
+static void zigbee_seed_known_devices(void);
+static void zigbee_touch_device(const char *ieee);
+static void zigbee_touch_short(uint16_t short_addr);
+static void zigbee_mark_offline_short(uint16_t short_addr);
+static bool zigbee_update_presence_state(const char *ieee,
+                                         bool occupied,
+                                         bool publish_output);
+static void zigbee_configure_occupancy_reporting(uint16_t short_addr, uint8_t endpoint);
+static const char *zigbee_signal_explanation(esp_zb_app_signal_type_t signal_type);
 
 static void zigbee_format_ieee(const uint8_t *ieee_addr, char *buffer, size_t buffer_len)
 {
@@ -58,6 +93,250 @@ static void zigbee_format_ieee(const uint8_t *ieee_addr, char *buffer, size_t bu
              "%02X%02X%02X%02X%02X%02X%02X%02X",
              ieee_addr[7], ieee_addr[6], ieee_addr[5], ieee_addr[4],
              ieee_addr[3], ieee_addr[2], ieee_addr[1], ieee_addr[0]);
+}
+
+static bool zigbee_ieee_by_short(uint16_t short_addr, char *ieee, size_t ieee_len)
+{
+    uint8_t ieee_addr[8] = {0};
+
+    if (esp_zb_ieee_address_by_short(short_addr, ieee_addr) != ESP_OK) {
+        return false;
+    }
+
+    zigbee_format_ieee(ieee_addr, ieee, ieee_len);
+    return true;
+}
+
+static zigbee_presence_state_t *zigbee_presence_find(const char *ieee)
+{
+    for (int i = 0; i < MAX_DEVICES; i++) {
+        if (presence_states[i].used &&
+            strcmp(presence_states[i].ieee, ieee) == 0) {
+            return &presence_states[i];
+        }
+    }
+
+    return NULL;
+}
+
+static zigbee_presence_state_t *zigbee_presence_slot(const char *ieee)
+{
+    zigbee_presence_state_t *slot = zigbee_presence_find(ieee);
+
+    if (slot != NULL) {
+        return slot;
+    }
+
+    for (int i = 0; i < MAX_DEVICES; i++) {
+        if (!presence_states[i].used) {
+            presence_states[i].used = true;
+            presence_states[i].online = false;
+            presence_states[i].known = false;
+            presence_states[i].occupied = false;
+            presence_states[i].last_seen_us = 0;
+            presence_states[i].last_change_us = 0;
+            snprintf(presence_states[i].ieee, sizeof(presence_states[i].ieee), "%s", ieee);
+            return &presence_states[i];
+        }
+    }
+
+    return NULL;
+}
+
+static void zigbee_seed_known_devices(void)
+{
+    for (int i = 0; i < device_manager_count(); i++) {
+        device_t *device = device_manager_get(i);
+        zigbee_presence_state_t *slot;
+
+        if (device == NULL || device_manager_is_control(device)) {
+            continue;
+        }
+
+        slot = zigbee_presence_slot(device->ieee);
+        if (slot == NULL) {
+            continue;
+        }
+
+        slot->online = true;
+    }
+}
+
+static void zigbee_touch_device(const char *ieee)
+{
+    zigbee_presence_state_t *slot;
+
+    if (ieee == NULL || ieee[0] == '\0') {
+        return;
+    }
+
+    slot = zigbee_presence_slot(ieee);
+    if (slot == NULL) {
+        return;
+    }
+
+    slot->online = true;
+    slot->last_seen_us = esp_timer_get_time();
+}
+
+static void zigbee_touch_short(uint16_t short_addr)
+{
+    char ieee[17] = {0};
+
+    if (!zigbee_ieee_by_short(short_addr, ieee, sizeof(ieee))) {
+        return;
+    }
+
+    zigbee_touch_device(ieee);
+}
+
+static void zigbee_configure_occupancy_reporting(uint16_t short_addr, uint8_t endpoint)
+{
+    static esp_zb_zcl_config_report_record_t record = {
+        .direction = ESP_ZB_ZCL_REPORT_DIRECTION_SEND,
+        .attributeID = ESP_ZB_ZCL_ATTR_OCCUPANCY_SENSING_OCCUPANCY_ID,
+        .attrType = ESP_ZB_ZCL_ATTR_TYPE_8BITMAP,
+        .min_interval = 0,
+        .max_interval = 30,
+        .reportable_change = NULL,
+    };
+
+    esp_zb_zcl_config_report_cmd_t cmd_req = {
+        .zcl_basic_cmd = {
+            .dst_addr_u.addr_short = short_addr,
+            .dst_endpoint = endpoint,
+            .src_endpoint = ZIGBEE_GATEWAY_ENDPOINT,
+        },
+        .address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT,
+        .clusterID = ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
+        .direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_SRV,
+        .dis_default_resp = 1,
+        .manuf_specific = 0,
+        .manuf_code = EZP_ZB_ZCL_CLUSTER_NON_MANUFACTURER_SPECIFIC,
+        .record_number = 1,
+        .record_field = &record,
+    };
+
+    esp_zb_zcl_config_report_cmd_req(&cmd_req);
+}
+
+static void zigbee_mark_offline_short(uint16_t short_addr)
+{
+    char ieee[17] = {0};
+    zigbee_presence_state_t *slot;
+
+    if (!zigbee_ieee_by_short(short_addr, ieee, sizeof(ieee))) {
+        return;
+    }
+
+    slot = zigbee_presence_find(ieee);
+    if (slot == NULL) {
+        return;
+    }
+
+    slot->online = false;
+}
+
+bool zigbee_core_is_device_online(const char *ieee)
+{
+    zigbee_presence_state_t *slot;
+
+    if (ieee == NULL || ieee[0] == '\0') {
+        return false;
+    }
+
+    slot = zigbee_presence_find(ieee);
+    if (slot == NULL) {
+        return false;
+    }
+
+    return slot->online;
+}
+
+uint32_t zigbee_core_device_last_seen_seconds(const char *ieee)
+{
+    zigbee_presence_state_t *slot;
+    int64_t now_us;
+    int64_t diff_us;
+
+    if (ieee == NULL || ieee[0] == '\0') {
+        return 0;
+    }
+
+    slot = zigbee_presence_find(ieee);
+    if (slot == NULL || slot->last_seen_us <= 0) {
+        return 0;
+    }
+
+    now_us = esp_timer_get_time();
+    diff_us = now_us - slot->last_seen_us;
+    if (diff_us <= 0) {
+        return 0;
+    }
+
+    return (uint32_t)(diff_us / 1000000LL);
+}
+
+static bool zigbee_update_presence_state(const char *ieee,
+                                         bool occupied,
+                                         bool publish_output)
+{
+    zigbee_presence_state_t *slot;
+    device_t *device = NULL;
+    int index = device_manager_find_by_ieee(ieee);
+    int64_t now_us = esp_timer_get_time();
+    const char *name = ieee;
+    char message[128];
+
+    slot = zigbee_presence_slot(ieee);
+    if (slot == NULL) {
+        return false;
+    }
+
+    if (slot->known && slot->occupied == occupied) {
+        return false;
+    }
+
+    if (index >= 0) {
+        device = device_manager_get(index);
+        if (device != NULL && device->name[0] != '\0') {
+            name = device->name;
+        }
+    }
+
+    slot->known = true;
+    slot->occupied = occupied;
+    slot->last_change_us = now_us;
+
+    if (!publish_output) {
+        return false;
+    }
+
+    snprintf(message,
+             sizeof(message),
+             "%s: %s",
+             name,
+             occupied ? "varlik algilandi" : "varlik algilanmadi");
+    ESP_LOGI(TAG, "%s", message);
+    return true;
+}
+
+static void zigbee_publish_presence_short(uint16_t short_addr,
+                                          bool occupied,
+                                          zigbee_presence_source_t source)
+{
+    (void)source;
+    char ieee[17] = {0};
+
+    if (!zigbee_ieee_by_short(short_addr, ieee, sizeof(ieee))) {
+        return;
+    }
+
+    zigbee_touch_device(ieee);
+
+    if (zigbee_update_presence_state(ieee, occupied, true)) {
+        mqtt_publish_device_presence(ieee, occupied);
+    }
 }
 
 static bool zigbee_has_cluster(const esp_zb_af_simple_desc_1_1_t *simple_desc, uint16_t cluster_id)
@@ -184,6 +463,9 @@ static void zigbee_simple_desc_cb(esp_zb_zdp_status_t zdo_status,
                  features);
 
         ctx->endpoint = simple_desc->endpoint;
+        if (zigbee_has_cluster(simple_desc, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING)) {
+            zigbee_configure_occupancy_reporting(ctx->short_addr, simple_desc->endpoint);
+        }
         zigbee_request_basic_attributes(ctx);
     } else {
         ESP_LOGW(TAG, "Simple descriptor request failed for %s, status=%d", ctx->ieee, zdo_status);
@@ -242,7 +524,6 @@ static void zigbee_register_joined_device(uint16_t short_addr)
 {
     uint8_t ieee_addr[8] = {0};
     char ieee_string[17];
-    char device_name[32];
 
     if (esp_zb_ieee_address_by_short(short_addr, ieee_addr) != ESP_OK) {
         ESP_LOGW(TAG, "Failed to resolve IEEE address for short 0x%04hx", short_addr);
@@ -250,9 +531,9 @@ static void zigbee_register_joined_device(uint16_t short_addr)
     }
 
     zigbee_format_ieee(ieee_addr, ieee_string, sizeof(ieee_string));
-    snprintf(device_name, sizeof(device_name), "Zigbee %04X", short_addr);
+    zigbee_touch_device(ieee_string);
 
-    if (device_manager_add(device_name, "zigbee", ieee_string) >= 0) {
+    if (device_manager_add(ieee_string, "zigbee", ieee_string) >= 0) {
         ESP_LOGI(TAG, "Registered joined device %s", ieee_string);
         web_log_send("Zigbee device joined");
     } else {
@@ -290,15 +571,78 @@ static void zigbee_copy_zcl_string(char *dest, size_t dest_len, const void *valu
     dest[length] = '\0';
 }
 
+static void zigbee_build_display_name(char *dest,
+                                      size_t dest_len,
+                                      const char *manufacturer,
+                                      const char *model)
+{
+    if (dest == NULL || dest_len == 0) {
+        return;
+    }
+
+    dest[0] = '\0';
+
+    if (manufacturer != NULL && manufacturer[0] != '\0' &&
+        model != NULL && model[0] != '\0') {
+        snprintf(dest, dest_len, "%s %s", manufacturer, model);
+        return;
+    }
+
+    if (model != NULL && model[0] != '\0') {
+        snprintf(dest, dest_len, "%s", model);
+        return;
+    }
+
+    if (manufacturer != NULL && manufacturer[0] != '\0') {
+        snprintf(dest, dest_len, "%s", manufacturer);
+    }
+}
+
 static esp_err_t zigbee_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message)
 {
+    if (callback_id == ESP_ZB_CORE_REPORT_ATTR_CB_ID) {
+        const esp_zb_zcl_report_attr_message_t *report = message;
+
+        if (report != NULL &&
+            report->src_address.addr_type == ESP_ZB_ZCL_ADDR_TYPE_SHORT &&
+            report->cluster == ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING &&
+            report->attribute.id == ESP_ZB_ZCL_ATTR_OCCUPANCY_SENSING_OCCUPANCY_ID &&
+            report->attribute.data.value != NULL) {
+            uint8_t occupancy = *((uint8_t *)report->attribute.data.value);
+            bool occupied = (occupancy & ESP_ZB_ZCL_OCCUPANCY_SENSING_OCCUPANCY_OCCUPIED) != 0;
+            zigbee_publish_presence_short(report->src_address.u.short_addr,
+                                          occupied,
+                                          ZIGBEE_PRESENCE_SOURCE_OCCUPANCY);
+        } else if (report != NULL &&
+                   report->src_address.addr_type == ESP_ZB_ZCL_ADDR_TYPE_SHORT) {
+            zigbee_touch_short(report->src_address.u.short_addr);
+        }
+        return ESP_OK;
+    }
+
+    if (callback_id == ESP_ZB_CORE_CMD_IAS_ZONE_ZONE_STATUS_CHANGE_NOT_ID) {
+        const esp_zb_zcl_ias_zone_status_change_notification_message_t *zone = message;
+
+        if (zone != NULL && zone->info.src_address.addr_type == ESP_ZB_ZCL_ADDR_TYPE_SHORT) {
+            bool occupied = (zone->zone_status & ESP_ZB_ZCL_IAS_ZONE_ZONE_STATUS_ALARM1) != 0;
+            zigbee_publish_presence_short(zone->info.src_address.u.short_addr,
+                                          occupied,
+                                          ZIGBEE_PRESENCE_SOURCE_IAS);
+        }
+        return ESP_OK;
+    }
+
     if (callback_id == ESP_ZB_CORE_CMD_READ_ATTR_RESP_CB_ID) {
         const esp_zb_zcl_cmd_read_attr_resp_message_t *resp = message;
         esp_zb_zcl_read_attr_resp_variable_t *var;
         char ieee[17] = {0};
         char manufacturer[32] = {0};
         char model[32] = {0};
+        char display_name[32] = {0};
         uint8_t ieee_addr[8] = {0};
+        int index;
+        device_t *device = NULL;
+        const char *device_type = "zigbee";
 
         if (resp == NULL || resp->info.src_address.addr_type != ESP_ZB_ZCL_ADDR_TYPE_SHORT) {
             return ESP_OK;
@@ -309,7 +653,6 @@ static esp_err_t zigbee_action_handler(esp_zb_core_action_callback_id_t callback
         }
 
         zigbee_format_ieee(ieee_addr, ieee, sizeof(ieee));
-
         for (var = resp->variables; var != NULL; var = var->next) {
             if (var->status != ESP_ZB_ZCL_STATUS_SUCCESS) {
                 continue;
@@ -320,6 +663,24 @@ static esp_err_t zigbee_action_handler(esp_zb_core_action_callback_id_t callback
             } else if (var->attribute.id == ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID) {
                 zigbee_copy_zcl_string(model, sizeof(model), var->attribute.data.value);
             }
+        }
+
+        zigbee_touch_short(resp->info.src_address.u.short_addr);
+
+        index = device_manager_find_by_ieee(ieee);
+        if (index >= 0) {
+            device = device_manager_get(index);
+            if (device != NULL && device->type[0] != '\0') {
+                device_type = device->type;
+            }
+        }
+
+        zigbee_build_display_name(display_name,
+                                  sizeof(display_name),
+                                  manufacturer,
+                                  model);
+        if (display_name[0] != '\0') {
+            device_manager_add(display_name, device_type, ieee);
         }
 
         device_manager_update_details(ieee,
@@ -336,8 +697,9 @@ static esp_err_t zigbee_action_handler(esp_zb_core_action_callback_id_t callback
             ESP_LOGI(TAG, "Device %s manufacturer=%s model=%s", ieee, manufacturer, model);
         }
 
-        if (device_manager_find_by_ieee(ieee) >= 0) {
-            device_t *device = device_manager_get(device_manager_find_by_ieee(ieee));
+        index = device_manager_find_by_ieee(ieee);
+        if (index >= 0) {
+            device = device_manager_get(index);
             if (device != NULL) {
                 mqtt_publish_joined_device(device->name, device->ieee);
             }
@@ -345,6 +707,26 @@ static esp_err_t zigbee_action_handler(esp_zb_core_action_callback_id_t callback
     }
 
     return ESP_OK;
+}
+
+static const char *zigbee_signal_explanation(esp_zb_app_signal_type_t signal_type)
+{
+    switch ((uint32_t)signal_type) {
+    case 0x2F:
+        return "Cihaz aga yetkilendirildi";
+    case 0x30:
+        return "Cihaz guncellemesi alindi";
+    case 0x32:
+        return "Ag katman durum bildirimi (NLME)";
+    case 0x12:
+        return "Cihaz aga iliskilendirildi";
+    case 0x13:
+        return "Cihaz agdan ayrildi";
+    case 0x36:
+        return "Pair (permit join) durumu degisti";
+    default:
+        return "Genel Zigbee olayi";
+    }
 }
 
 void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
@@ -409,7 +791,18 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             esp_zb_zdo_signal_device_annce_params_t *params =
                 (esp_zb_zdo_signal_device_annce_params_t *)esp_zb_app_signal_get_params(signal);
             ESP_LOGI(TAG, "Device announced short address 0x%04hx", params->device_short_addr);
+            zigbee_touch_short(params->device_short_addr);
             zigbee_register_joined_device(params->device_short_addr);
+        }
+        break;
+
+    case ESP_ZB_ZDO_SIGNAL_LEAVE_INDICATION:
+        if (status == ESP_OK)
+        {
+            esp_zb_zdo_signal_leave_indication_params_t *params =
+                (esp_zb_zdo_signal_leave_indication_params_t *)esp_zb_app_signal_get_params(signal);
+            zigbee_mark_offline_short(params->short_addr);
+            ESP_LOGI(TAG, "Device 0x%04hx left network", params->short_addr);
         }
         break;
 
@@ -434,9 +827,10 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
         break;
 
     default:
-        ESP_LOGI(TAG, "Zigbee signal %s (0x%x), status: %s",
+        ESP_LOGI(TAG, "Zigbee signal %s (0x%x): %s, status: %s",
                  esp_zb_zdo_signal_to_string(signal_type),
                  signal_type,
+                 zigbee_signal_explanation(signal_type),
                  esp_err_to_name(status));
         break;
     }
@@ -486,6 +880,8 @@ void zigbee_core_init(void)
     pairing_active = false;
     zigbee_ready = false;
     zigbee_started = true;
+    memset(presence_states, 0, sizeof(presence_states));
+    zigbee_seed_known_devices();
 
     esp_zb_platform_config_t platform_config = {
         .radio_config = {

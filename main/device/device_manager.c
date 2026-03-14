@@ -109,6 +109,25 @@ int device_manager_find_by_ieee(const char *ieee)
     return -1;
 }
 
+bool device_manager_remove_by_ieee(const char *ieee)
+{
+    int index = device_manager_find_by_ieee(ieee);
+
+    if (index < 0) {
+        return false;
+    }
+
+    for (int i = index; i < device_count - 1; i++) {
+        devices[i] = devices[i + 1];
+    }
+
+    memset(&devices[device_count - 1], 0, sizeof(device_t));
+    device_count--;
+    device_manager_save();
+
+    return true;
+}
+
 int device_manager_update_details(const char *ieee,
                                   uint16_t short_addr,
                                   uint8_t endpoint,

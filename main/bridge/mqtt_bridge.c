@@ -10,6 +10,7 @@
 #include "esp_wifi.h"
 #include "mqtt_client.h"
 
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -20,10 +21,24 @@
 #define RESET_STATE_TOPIC       "gateway/control/reset/state"
 #define PAIR_COMMAND_TOPIC      "gateway/control/pair_60s/set"
 #define PAIR_STATE_TOPIC        "gateway/control/pair_60s/state"
+#define HA_SWITCH_PAYLOAD_LEN   768
+#define HA_ENTITY_PAYLOAD_LEN   1024
+#define DEVICE_ATTR_PAYLOAD_LEN 768
 
 static const char *TAG = "MQTT";
 
 static esp_mqtt_client_handle_t client;
+
+static bool mqtt_is_presence_sensor(const device_t *device)
+{
+    if (device == NULL) {
+        return false;
+    }
+
+    return strstr(device->features, "0x0406") != NULL ||
+           strstr(device->features, "0x0500") != NULL ||
+           strcmp(device->type, "binary_sensor") == 0;
+}
 
 static void mqtt_publish_ha_switch(const char *name,
                                    const char *unique_id,
@@ -32,11 +47,15 @@ static void mqtt_publish_ha_switch(const char *name,
                                    const char *icon)
 {
     char topic[128];
-    char payload[768];
+    char *payload = malloc(HA_SWITCH_PAYLOAD_LEN);
+
+    if (payload == NULL) {
+        return;
+    }
 
     snprintf(topic, sizeof(topic), "homeassistant/switch/%s/config", unique_id);
     snprintf(payload,
-             sizeof(payload),
+             HA_SWITCH_PAYLOAD_LEN,
              "{"
              "\"name\":\"%s\","
              "\"unique_id\":\"%s\","
@@ -58,36 +77,90 @@ static void mqtt_publish_ha_switch(const char *name,
              GATEWAY_DEVICE_ID);
 
     esp_mqtt_client_publish(client, topic, payload, 0, 1, 1);
+    free(payload);
 }
 
-static void mqtt_publish_ha_joined_sensor(const char *name, const char *ieee)
+static void mqtt_publish_ha_joined_entity(const device_t *device)
 {
-    char topic[160];
-    char payload[768];
+    char topic[192];
+    char legacy_topic[192];
+    char *payload;
+    const char *component;
 
-    snprintf(topic, sizeof(topic), "homeassistant/sensor/%s/config", ieee);
-    snprintf(payload,
-             sizeof(payload),
-             "{"
-             "\"name\":\"%s\","
-             "\"unique_id\":\"zigbee_%s\","
-             "\"state_topic\":\"gateway/device/%s/state\","
-             "\"json_attributes_topic\":\"gateway/device/%s/attributes\","
-             "\"entity_category\":\"diagnostic\","
-             "\"icon\":\"mdi:zigbee\","
-             "\"device\":{"
-             "\"name\":\"%s\","
-             "\"identifiers\":[\"zigbee_%s\"]"
-             "}"
-             "}",
-             name,
-             ieee,
-             ieee,
-             ieee,
-             name,
-             ieee);
+    if (device == NULL) {
+        return;
+    }
+
+    payload = malloc(HA_ENTITY_PAYLOAD_LEN);
+    if (payload == NULL) {
+        return;
+    }
+
+    component = "sensor";
+    if (mqtt_is_presence_sensor(device) || strcmp(device->type, "binary_sensor") == 0) {
+        component = "binary_sensor";
+    } else if (strcmp(device->type, "switch") == 0) {
+        component = "switch";
+    } else if (strcmp(device->type, "light") == 0) {
+        component = "light";
+    }
+
+    snprintf(topic, sizeof(topic), "homeassistant/%s/%s/config", component, device->ieee);
+
+    if (strcmp(component, "binary_sensor") == 0) {
+        snprintf(legacy_topic, sizeof(legacy_topic), "homeassistant/sensor/%s/config", device->ieee);
+        esp_mqtt_client_publish(client, legacy_topic, "", 0, 1, 1);
+
+        snprintf(payload,
+                 HA_ENTITY_PAYLOAD_LEN,
+                 "{"
+                 "\"name\":\"%s\","
+                 "\"unique_id\":\"zigbee_%s\","
+                 "\"state_topic\":\"gateway/device/%s/state\","
+                 "\"json_attributes_topic\":\"gateway/device/%s/attributes\","
+                 "\"payload_on\":\"ON\","
+                 "\"payload_off\":\"OFF\","
+                 "\"device_class\":\"occupancy\","
+                 "\"icon\":\"mdi:motion-sensor\","
+                 "\"device\":{"
+                 "\"name\":\"%s\","
+                 "\"identifiers\":[\"zigbee_%s\"]"
+                 "}"
+                 "}",
+                 device->name,
+                 device->ieee,
+                 device->ieee,
+                 device->ieee,
+                 device->name,
+                 device->ieee);
+    } else {
+        snprintf(legacy_topic, sizeof(legacy_topic), "homeassistant/binary_sensor/%s/config", device->ieee);
+        esp_mqtt_client_publish(client, legacy_topic, "", 0, 1, 1);
+
+        snprintf(payload,
+                 HA_ENTITY_PAYLOAD_LEN,
+                 "{"
+                 "\"name\":\"%s\","
+                 "\"unique_id\":\"zigbee_%s\","
+                 "\"state_topic\":\"gateway/device/%s/state\","
+                 "\"json_attributes_topic\":\"gateway/device/%s/attributes\","
+                 "\"entity_category\":\"diagnostic\","
+                 "\"icon\":\"mdi:zigbee\","
+                 "\"device\":{"
+                 "\"name\":\"%s\","
+                 "\"identifiers\":[\"zigbee_%s\"]"
+                 "}"
+                 "}",
+                 device->name,
+                 device->ieee,
+                 device->ieee,
+                 device->ieee,
+                 device->name,
+                 device->ieee);
+    }
 
     esp_mqtt_client_publish(client, topic, payload, 0, 1, 1);
+    free(payload);
 }
 
 static void mqtt_publish_text_state(const char *topic, const char *payload, bool retained)
@@ -229,7 +302,7 @@ void mqtt_publish_all_discovery(void)
             continue;
         }
 
-        mqtt_publish_ha_joined_sensor(device->name, device->ieee);
+        mqtt_publish_ha_joined_entity(device);
         mqtt_publish_joined_device(device->name, device->ieee);
     }
 }
@@ -238,7 +311,7 @@ void mqtt_publish_joined_device(const char *name, const char *ieee)
 {
     device_t *device = NULL;
     char topic[128];
-    char payload[512];
+    char *payload = NULL;
     int index;
 
     if (client == NULL) {
@@ -250,15 +323,24 @@ void mqtt_publish_joined_device(const char *name, const char *ieee)
         device = device_manager_get(index);
     }
 
-    mqtt_publish_ha_joined_sensor(name, ieee);
+    if (device != NULL) {
+        mqtt_publish_ha_joined_entity(device);
+    }
 
     snprintf(topic, sizeof(topic), "gateway/device/%s/state", ieee);
-    mqtt_publish_text_state(topic, (device && device->type[0] != '\0') ? device->type : "joined", true);
+    if (device == NULL || !mqtt_is_presence_sensor(device)) {
+        mqtt_publish_text_state(topic, (device && device->type[0] != '\0') ? device->type : "joined", true);
+    }
 
     if (device != NULL) {
+        payload = malloc(DEVICE_ATTR_PAYLOAD_LEN);
+        if (payload == NULL) {
+            return;
+        }
+
         snprintf(topic, sizeof(topic), "gateway/device/%s/attributes", ieee);
         snprintf(payload,
-                 sizeof(payload),
+                 DEVICE_ATTR_PAYLOAD_LEN,
                  "{"
                  "\"name\":\"%s\","
                  "\"type\":\"%s\","
@@ -280,7 +362,20 @@ void mqtt_publish_joined_device(const char *name, const char *ieee)
                  device->profile_id,
                  device->device_id);
         mqtt_publish_text_state(topic, payload, true);
+        free(payload);
     }
+}
+
+void mqtt_publish_device_presence(const char *ieee, bool occupied)
+{
+    char topic[128];
+
+    if (client == NULL || ieee == NULL) {
+        return;
+    }
+
+    snprintf(topic, sizeof(topic), "gateway/device/%s/state", ieee);
+    mqtt_publish_text_state(topic, occupied ? "ON" : "OFF", true);
 }
 
 void mqtt_publish_pair_state(bool active)

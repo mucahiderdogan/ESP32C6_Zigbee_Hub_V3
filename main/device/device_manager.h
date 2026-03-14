@@ -26,6 +26,7 @@ int device_manager_add(const char *name,
                        const char *ieee);
 
 int device_manager_find_by_ieee(const char *ieee);
+bool device_manager_remove_by_ieee(const char *ieee);
 int device_manager_update_details(const char *ieee,
                                   uint16_t short_addr,
                                   uint8_t endpoint,
