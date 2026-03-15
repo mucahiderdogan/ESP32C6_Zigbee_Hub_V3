@@ -11,3 +11,4 @@ extern EventGroupHandle_t wifi_event_group;
 
 void wifi_manager_init(void);
 bool wifi_manager_wait_until_ready(TickType_t timeout_ticks);
+bool wifi_manager_is_setup_mode(void);

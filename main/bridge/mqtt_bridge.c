@@ -1,6 +1,6 @@
 #include "mqtt_bridge.h"
 
-#include "config.h"
+#include "config_manager.h"
 #include "device_manager.h"
 #include "web_server.h"
 #include "zigbee_core.h"
@@ -255,10 +255,10 @@ void mqtt_bridge_start(void)
     ESP_LOGI(TAG, "MQTT Client ID: %s", client_id);
 
     esp_mqtt_client_config_t mqtt_cfg = {
-        .broker.address.uri = MQTT_BROKER_URI,
+        .broker.address.uri = config_manager_get_mqtt_broker_uri(),
         .credentials.client_id = client_id,
-        .credentials.username = MQTT_USER,
-        .credentials.authentication.password = MQTT_PASS,
+        .credentials.username = config_manager_get_mqtt_user(),
+        .credentials.authentication.password = config_manager_get_mqtt_pass(),
     };
 
     client = esp_mqtt_client_init(&mqtt_cfg);

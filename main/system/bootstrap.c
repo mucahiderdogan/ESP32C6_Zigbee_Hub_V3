@@ -1,5 +1,6 @@
 #include "bootstrap.h"
 
+#include "config_manager.h"
 #include "device_manager.h"
 #include "mqtt_bridge.h"
 #include "web_server.h"
@@ -32,7 +33,11 @@ static void bootstrap_network(void)
 
     wifi_manager_wait_until_ready(portMAX_DELAY);
 
-    ESP_LOGI(TAG, "Network ready");
+    if (wifi_manager_is_setup_mode()) {
+        ESP_LOGI(TAG, "Factory setup network ready");
+    } else {
+        ESP_LOGI(TAG, "Network ready");
+    }
 }
 
 static void bootstrap_zigbee(void)
@@ -65,8 +70,16 @@ static void bootstrap_publish_initial_state(void)
 
 void system_bootstrap_start(void)
 {
+    config_manager_init();
     bootstrap_devices();
     bootstrap_network();
+
+    if (config_manager_is_factory_mode()) {
+        ESP_LOGI(TAG, "Factory mode active, starting setup web server only");
+        web_server_start();
+        return;
+    }
+
     bootstrap_services();
     bootstrap_zigbee();
     bootstrap_publish_initial_state();
