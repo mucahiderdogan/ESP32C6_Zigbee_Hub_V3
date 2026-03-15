@@ -33,6 +33,8 @@
 #define ZIGBEE_GATEWAY_ENDPOINT 1
 #define ZIGBEE_PRIMARY_CHANNEL_MASK (1UL << ZIGBEE_CHANNEL)
 #define ZIGBEE_DEVICE_ONLINE_TIMEOUT_S 120
+#define ZIGBEE_PRESENCE_TIMEOUT_S 30
+#define ZIGBEE_PRESENCE_WATCHDOG_INTERVAL_MS 2000
 
 #define ZIGBEE_COORDINATOR_CONFIG()          \
     {                                        \
@@ -61,6 +63,7 @@ typedef struct {
     bool known;
     bool occupied;
     int64_t last_seen_us;
+    int64_t last_presence_us;
     int64_t last_change_us;
     char ieee[17];
 } zigbee_presence_state_t;
@@ -80,11 +83,16 @@ static void zigbee_seed_known_devices(void);
 static void zigbee_touch_device(const char *ieee);
 static void zigbee_touch_short(uint16_t short_addr);
 static void zigbee_mark_offline_short(uint16_t short_addr);
+static bool zigbee_is_unsupported_presence_device(const char *ieee);
+static bool zigbee_device_has_feature(const char *ieee, const char *feature);
+static void zigbee_restore_presence_reporting(void);
+static void zigbee_refresh_presence_reporting(const char *ieee);
 static bool zigbee_update_presence_state(const char *ieee,
                                          bool occupied,
                                          bool publish_output);
 static void zigbee_configure_occupancy_reporting(uint16_t short_addr, uint8_t endpoint);
 static const char *zigbee_signal_explanation(esp_zb_app_signal_type_t signal_type);
+static void zigbee_presence_watchdog_task(void *pvParameters);
 
 static void zigbee_format_ieee(const uint8_t *ieee_addr, char *buffer, size_t buffer_len)
 {
@@ -134,6 +142,7 @@ static zigbee_presence_state_t *zigbee_presence_slot(const char *ieee)
             presence_states[i].known = false;
             presence_states[i].occupied = false;
             presence_states[i].last_seen_us = 0;
+            presence_states[i].last_presence_us = 0;
             presence_states[i].last_change_us = 0;
             snprintf(presence_states[i].ieee, sizeof(presence_states[i].ieee), "%s", ieee);
             return &presence_states[i];
@@ -237,6 +246,109 @@ static void zigbee_mark_offline_short(uint16_t short_addr)
     slot->online = false;
 }
 
+static bool zigbee_is_unsupported_presence_device(const char *ieee)
+{
+    int index;
+    device_t *device;
+
+    if (ieee == NULL || ieee[0] == '\0') {
+        return false;
+    }
+
+    index = device_manager_find_by_ieee(ieee);
+    if (index < 0) {
+        return false;
+    }
+
+    device = device_manager_get(index);
+    if (device == NULL) {
+        return false;
+    }
+
+    return strcmp(device->model, "SNZB-06P") == 0;
+}
+
+static bool zigbee_device_has_feature(const char *ieee, const char *feature)
+{
+    int index;
+    device_t *device;
+
+    if (ieee == NULL || feature == NULL) {
+        return false;
+    }
+
+    index = device_manager_find_by_ieee(ieee);
+    if (index < 0) {
+        return false;
+    }
+
+    device = device_manager_get(index);
+    if (device == NULL) {
+        return false;
+    }
+
+    return strstr(device->features, feature) != NULL;
+}
+
+static void zigbee_restore_presence_reporting(void)
+{
+    for (int i = 0; i < device_manager_count(); i++) {
+        device_t *device = device_manager_get(i);
+
+        if (device == NULL || device_manager_is_control(device)) {
+            continue;
+        }
+
+        if (device->short_addr == 0 || device->endpoint == 0) {
+            continue;
+        }
+
+        if (!zigbee_device_has_feature(device->ieee, "0x0406")) {
+            continue;
+        }
+
+        if (zigbee_is_unsupported_presence_device(device->ieee)) {
+            continue;
+        }
+
+        zigbee_configure_occupancy_reporting(device->short_addr, device->endpoint);
+    }
+}
+
+static void zigbee_refresh_presence_reporting(const char *ieee)
+{
+    int index;
+    device_t *device;
+
+    if (ieee == NULL || ieee[0] == '\0') {
+        return;
+    }
+
+    index = device_manager_find_by_ieee(ieee);
+    if (index < 0) {
+        return;
+    }
+
+    device = device_manager_get(index);
+    if (device == NULL) {
+        return;
+    }
+
+    if (device->short_addr == 0 || device->endpoint == 0) {
+        return;
+    }
+
+    if (!zigbee_device_has_feature(ieee, "0x0406")) {
+        return;
+    }
+
+    if (zigbee_is_unsupported_presence_device(ieee)) {
+        return;
+    }
+
+    zigbee_configure_occupancy_reporting(device->short_addr, device->endpoint);
+}
+
 bool zigbee_core_is_device_online(const char *ieee)
 {
     zigbee_presence_state_t *slot;
@@ -293,6 +405,12 @@ static bool zigbee_update_presence_state(const char *ieee,
         return false;
     }
 
+    if (occupied && (!slot->known || !slot->occupied)) {
+        slot->last_presence_us = now_us;
+    } else if (!occupied) {
+        slot->last_presence_us = 0;
+    }
+
     if (slot->known && slot->occupied == occupied) {
         return false;
     }
@@ -334,8 +452,54 @@ static void zigbee_publish_presence_short(uint16_t short_addr,
 
     zigbee_touch_device(ieee);
 
+    if (zigbee_is_unsupported_presence_device(ieee)) {
+        return;
+    }
+
     if (zigbee_update_presence_state(ieee, occupied, true)) {
         mqtt_publish_device_presence(ieee, occupied);
+    }
+}
+
+static void zigbee_presence_watchdog_task(void *pvParameters)
+{
+    (void)pvParameters;
+
+    while (true) {
+        int64_t now_us = esp_timer_get_time();
+
+        for (int i = 0; i < MAX_DEVICES; i++) {
+            zigbee_presence_state_t *slot = &presence_states[i];
+            int64_t diff_us;
+
+            if (!slot->used || !slot->occupied) {
+                continue;
+            }
+
+            if (!zigbee_device_has_feature(slot->ieee, "0x0406")) {
+                continue;
+            }
+
+            if (zigbee_is_unsupported_presence_device(slot->ieee)) {
+                continue;
+            }
+
+            if (slot->last_presence_us <= 0) {
+                continue;
+            }
+
+            diff_us = now_us - slot->last_presence_us;
+            if (diff_us <= ((int64_t)ZIGBEE_PRESENCE_TIMEOUT_S * 1000000LL)) {
+                continue;
+            }
+
+            if (zigbee_update_presence_state(slot->ieee, false, true)) {
+                mqtt_publish_device_presence(slot->ieee, false);
+                zigbee_refresh_presence_reporting(slot->ieee);
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(ZIGBEE_PRESENCE_WATCHDOG_INTERVAL_MS));
     }
 }
 
@@ -760,6 +924,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
         else
         {
             zigbee_ready = true;
+            zigbee_restore_presence_reporting();
             ESP_LOGI(TAG, "Coordinator rebooted, network restored");
             web_log_send("Zigbee network restored");
         }
@@ -769,6 +934,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
         if (status == ESP_OK)
         {
             zigbee_ready = true;
+            zigbee_restore_presence_reporting();
             ESP_LOGI(TAG,
                      "Zigbee network formed PAN ID 0x%04hx channel %d short 0x%04hx",
                      esp_zb_get_pan_id(),
@@ -895,6 +1061,7 @@ void zigbee_core_init(void)
     ESP_ERROR_CHECK(esp_zb_platform_config(&platform_config));
     esp_zb_core_action_handler_register(zigbee_action_handler);
     xTaskCreate(zigbee_task, "Zigbee_main", 8192, NULL, 5, NULL);
+    xTaskCreate(zigbee_presence_watchdog_task, "Zigbee_presence", 4096, NULL, 4, NULL);
 
     ESP_LOGI(TAG, "Core initialized on channel %d", ZIGBEE_CHANNEL);
 }
